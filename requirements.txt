@@ -1,6 +1,8 @@
 streamlit
+transformers
 openai-whisper
 torch
+sentencepiece
 ffmpeg-python
 moviepy==1.0.3
 decorator>=4.0.2
