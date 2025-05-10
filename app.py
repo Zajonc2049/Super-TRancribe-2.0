@@ -233,7 +233,7 @@ with col1:
     # st.file_uploader повертає файловий об'єкт (UploadedFile)
     uploaded_file = st.file_uploader(
     "Завантажте аудіо/відео файл",
-    type=[".wav", ".mp3", ".mp4", ".mov", ".avi", ".mkv", ".webm", ".mpga", ".mpeg4"], # <= ДОДАЛИ КРАПКИ ТА '.mpeg4'
+    type=[".wav", ".mp3", ".mp4", ".mov", ".avi", ".mkv", ".webm", ".mpga", ".mpeg4"], 
     accept_multiple_files=False
 )
 
