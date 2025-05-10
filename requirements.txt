@@ -1,0 +1,14 @@
+streamlit
+openai-whisper
+torch
+ffmpeg-python
+moviepy==1.0.3
+decorator>=4.0.2
+imageio>=2.5
+imageio-ffmpeg>=0.4.0
+numpy>=1.17.3
+proglog<=1.0.0
+tqdm>=4.11.2
+# python-docx  
+# pytube       
+# requests 
