@@ -1,0 +1,5 @@
+[server]
+maxUploadSize = 1024  # Розмір у МБ (1 ГБ = 1024 МБ)
+
+[browser]
+gatherUsageStats = false  # Необов'язково: відключення збору статистики використання
