@@ -232,10 +232,10 @@ col1, col2 = st.columns([2, 1]) # Створюємо 2 колонки з спі�
 with col1:
     # st.file_uploader повертає файловий об'єкт (UploadedFile)
     uploaded_file = st.file_uploader(
-        "Завантажте аудіо/відео файл",
-        type=["wav", "mp3", "mp4", "mov", "avi", "mkv", "webm", "mpga"], # Додайте всі типи, які підтримуєте
-        accept_multiple_files=False
-    )
+    "Завантажте аудіо/відео файл",
+    type=[".wav", ".mp3", ".mp4", ".mov", ".avi", ".mkv", ".webm", ".mpga", ".mpeg4"], # <= ДОДАЛИ КРАПКИ ТА '.mpeg4'
+    accept_multiple_files=False
+)
 
 with col2:
     # st.selectbox для мови
