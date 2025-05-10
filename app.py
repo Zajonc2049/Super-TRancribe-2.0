@@ -1,4 +1,4 @@
-# app.py для Streamlit (Повна версія з візуальним прогресом та виправленнями)
+# app.py для Streamlit (Інтегрована версія з розшифровкою та перекладом)
 
 import streamlit as st
 import whisper
@@ -11,13 +11,14 @@ import logging
 import sys
 from moviepy.editor import VideoFileClip # Використовується для обробки відео
 import io # Потрібно для читання завантажених файлів
+import torch
+from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
+import tempfile
 
 # --- Налаштування логування ---
-# Логування на Streamlit Cloud працює дещо інакше, але ці налаштування не завадять.
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
 
 # --- Шляхи до тимчасових та вихідних директорій ---
-# На Streamlit Cloud ці директорії будуть тимчасовими для кожного сеансу або контейнера
 BASE_DIR = os.getcwd()
 TEMP_DIR = os.path.join(BASE_DIR, "temp_files")
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
@@ -27,8 +28,9 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 logging.info(f"Створено директорії: {TEMP_DIR} та {OUTPUT_DIR}")
 
 
-# --- Завантаження моделі ---
+# --- ФУНКЦІЇ ЗАВАНТАЖЕННЯ МОДЕЛЕЙ ---
 
+# Завантаження моделі Whisper
 @st.cache_resource
 def load_whisper_model(model_name="base"):
     """Завантажує модель Whisper і кешує її."""
@@ -39,34 +41,52 @@ def load_whisper_model(model_name="base"):
         return model
     except Exception as e:
         logging.error(f"Помилка під час завантаження моделі Whisper '{model_name}': {e}")
-        st.error(f"Не вдалося завантажити модель Whisper: {e}") # Відображаємо помилку в UI
-        return None # Повертаємо None у випадку помилки
+        st.error(f"Не вдалося завантажити модель Whisper: {e}")
+        return None
+
+# Завантаження моделі M2M-100 для перекладу
+@st.cache_resource
+def load_m2m100_model(model_size="facebook/m2m100_418M"):
+    """
+    Завантажує модель M2M-100 та токенізатор
+    Доступні розміри: 
+    - facebook/m2m100_418M (менша версія ~1GB)
+    - facebook/m2m100_1.2B (більша версія ~2.4GB)
+    """
+    logging.info(f"Завантаження моделі M2M-100: {model_size}")
+    try:
+        tokenizer = M2M100Tokenizer.from_pretrained(model_size)
+        model = M2M100ForConditionalGeneration.from_pretrained(model_size)
+        logging.info("Модель M2M-100 завантажено успішно.")
+        return model, tokenizer
+    except Exception as e:
+        logging.error(f"Помилка завантаження моделі M2M-100: {e}")
+        st.error(f"Помилка завантаження моделі M2M-100: {e}")
+        return None, None
 
 # Завантажуємо модель при старті додатку
-model = load_whisper_model("base") # Можете зробити назву моделі параметром, якщо хочете
+whisper_model = load_whisper_model("base")
 
 # Перевіряємо, чи модель завантажилась успішно, перед тим як продовжувати
-if model is None:
-    st.stop() # Зупиняємо виконання скрипта, якщо модель не завантажилась
+if whisper_model is None:
+    st.stop()
 
 
-# --- Ваша логіка розшифровки та допоміжні функції ---
-# !!! ЦЕ ВАШ КОД ФУНКЦІЙ З ПОПЕРЕДНЬОГО app.py !!!
-# !!! Переконайтеся, що він скопійований повністю та правильно !!!
+# --- ФУНКЦІЇ ОБРОБКИ ---
 
 def transcribe_audio(audio_path, language=None, task="transcribe"):
     """
     Функція для розшифровки аудіо файлу за допомогою Whisper.
-    Використовує глобальну змінну 'model'.
+    Використовує глобальну змінну 'whisper_model'.
     """
     logging.info(f"Запуск розшифровки/перекладу для: {os.path.basename(audio_path)}, мова: {language}, завдання: {task}")
     try:
         # Використовуємо глобальну модель
-        global model
-        if model is None:
+        global whisper_model
+        if whisper_model is None:
             raise RuntimeError("Модель Whisper не завантажена.")
 
-        result = model.transcribe(audio_path, language=language if language != "auto" else None, task=task)
+        result = whisper_model.transcribe(audio_path, language=language if language != "auto" else None, task=task)
         text = result["text"]
 
         # Створення шляхів для вихідних файлів
@@ -97,15 +117,102 @@ def transcribe_audio(audio_path, language=None, task="transcribe"):
         logging.info(f"Субтитри збережено до: {srt_path}")
 
         logging.info("Розшифровка/переклад завершено успішно.")
-        return text, srt_path, txt_path
+        return text, srt_path, txt_path, result["segments"]
 
     except Exception as e:
-        logging.error(f"Помилка під час розшифровки/перекладу transcribe_audio: {e}", exc_info=True) # exc_info=True додасть повний traceback у логи
+        logging.error(f"Помилка під час розшифровки/перекладу transcribe_audio: {e}", exc_info=True)
         # Повертаємо зрозуміле повідомлення про помилку та None для шляхів
-        return f"Помилка під час розшифровки: {e}", None, None
+        return f"Помилка під час розшифровки: {e}", None, None, None
 
 
-# Змінена функція process_media - приймає status_object
+# Функція для перекладу тексту за допомогою M2M-100
+def translate_with_m2m100(text, source_lang, target_lang):
+    """
+    Перекладає текст з вихідної мови на цільову за допомогою моделі M2M-100.
+    """
+    logging.info(f"Запуск перекладу тексту з {source_lang} на {target_lang}")
+    model, tokenizer = load_m2m100_model()
+    
+    if not model or not tokenizer:
+        return "Не вдалося завантажити модель перекладу"
+    
+    try:
+        # Встановлюємо вихідну мову для токенізатора
+        tokenizer.src_lang = source_lang
+        
+        # Токенізуємо вхідний текст
+        encoded_text = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+        
+        # Генеруємо переклад
+        with torch.no_grad():
+            # Встановлюємо токен цільової мови для генерації
+            generated_tokens = model.generate(
+                **encoded_text,
+                forced_bos_token_id=tokenizer.get_lang_id(target_lang),
+                max_length=512
+            )
+        
+        # Декодуємо результат
+        translated_text = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+        
+        # Збереження перекладу в TXT файл
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        translation_filename = f"translation_{source_lang}_to_{target_lang}_{timestamp}.txt"
+        translation_path = os.path.join(OUTPUT_DIR, translation_filename)
+        
+        with open(translation_path, "w", encoding="utf-8") as f:
+            f.write(translated_text)
+        
+        logging.info(f"Переклад успішно збережено до: {translation_path}")
+        return translated_text, translation_path
+    
+    except Exception as e:
+        error_msg = f"Помилка під час перекладу: {e}"
+        logging.error(error_msg, exc_info=True)
+        return error_msg, None
+
+
+# Функція для отримання підтримуваних мов M2M-100
+def get_supported_languages():
+    """Повертає словник підтримуваних мов M2M-100"""
+    return {
+        "uk": "українська",
+        "en": "англійська",
+        "ru": "російська",
+        "de": "німецька",
+        "fr": "французька",
+        "es": "іспанська",
+        "pl": "польська",
+        "it": "італійська",
+        "cs": "чеська",
+        "ja": "японська",
+        "zh": "китайська",
+        "ko": "корейська",
+        "ar": "арабська",
+        "tr": "турецька",
+        "vi": "в'єтнамська",
+        "pt": "португальська",
+        "be": "білоруська",
+        "sk": "словацька",
+        "bg": "болгарська",
+        "nl": "нідерландська", 
+        "da": "данська",
+        "sv": "шведська",
+        "no": "норвезька",
+        "fi": "фінська",
+        "hu": "угорська",
+        "ro": "румунська",
+        "lt": "литовська",
+        "lv": "латвійська",
+        "et": "естонська",
+        "el": "грецька",
+        "he": "іврит",
+        "hi": "гінді",
+        # Додайте інші мови за потреби
+    }
+
+
+# Функція обробки медіа-файлу - з підтримкою progress_bar
 def process_media(media_file_object, language, task, status_object):
     """
     Обробляє завантажений медіа-файл (аудіо або відео), витягує аудіо, якщо потрібно,
@@ -115,7 +222,7 @@ def process_media(media_file_object, language, task, status_object):
     if media_file_object is None:
         status_object.update(label="Не завантажено файл", state="error")
         logging.warning("process_media викликано без файлу.")
-        return "Файл не завантажено", None, None
+        return "Файл не завантажено", None, None, None
 
     logging.info(f"Отримано файл для обробки: {media_file_object.name}")
     status_object.update(label=f"Отримано файл '{media_file_object.name}'", state="running", expanded=True)
@@ -155,13 +262,13 @@ def process_media(media_file_object, language, task, status_object):
                  status_object.update(label="Помилка при витягуванні аудіо", state="error")
                  logging.error(f"Помилка при витягуванні аудіо з відео {filename}: {e}", exc_info=True)
                  # Повертаємо помилку і зупиняємо обробку для цього файлу
-                 return f"Помилка при обробці відео (витягнення аудіо): {e}", None, None
+                 return f"Помилка при обробці відео (витягнення аудіо): {e}", None, None, None
 
 
         # Розшифрувати аудіо
         status_object.update(label=f"Розшифровка аудіо...", state="running")
         # Можна передати status_object в transcribe_audio, якщо вона підтримує оновлення статусу
-        text_output, srt_path, txt_path = transcribe_audio(audio_to_process_path, language, task)
+        text_output, srt_path, txt_path, segments = transcribe_audio(audio_to_process_path, language, task)
 
         # Перевіряємо, чи була помилка в transcribe_audio
         if text_output is None and (srt_path is None or txt_path is None):
@@ -185,16 +292,16 @@ def process_media(media_file_object, language, task, status_object):
             # Вказуємо на успіх тільки якщо не було помилки в transcribe_audio
             status_object.update(label="Обробка завершена!", state="complete")
 
-        return text_output, srt_path, txt_path
+        return text_output, srt_path, txt_path, segments
 
     except Exception as e:
         # Обробка будь-якої іншої помилки під час обробки медіа
         status_object.update(label=f"Виникла неочікувана помилка: {e}", state="error")
         logging.error(f"Загальна помилка в process_media: {e}", exc_info=True)
-        return f"Виникла неочікувана помилка: {e}", None, None
+        return f"Виникла неочікувана помилка: {e}", None, None, None
 
 
-# Функції для роботи з вихідними файлами (залишаємо ваші оригінальні)
+# Функції для роботи з вихідними файлами
 def get_output_files():
     """Повертає список шляхів до файлів у вихідній директорії."""
     logging.info(f"Отримання списку файлів з {OUTPUT_DIR}")
@@ -217,224 +324,387 @@ def delete_all_output_files():
              logging.info("Вихідна директорія не існує, видалення не потрібне.")
     except Exception as e:
         logging.error(f"Помилка при видаленні вихідних файлів: {e}", exc_info=True)
-        st.error(f"Не вдалося очистити вихідні файли: {e}") # Можна додати повідомлення про помилку в UI
+        st.error(f"Не вдалося очистити вихідні файли: {e}")
     return get_output_files()
 
 
-# --- Побудова інтерфейсу Streamlit ---
+# --- ПОБУДОВА ІНТЕРФЕЙСУ STREAMLIT ---
 
-st.title("🎤 Розшифровка аудіо та відео 🎞️")
-st.markdown("Завантажте аудіо або відео файл для отримання текстової розшифровки та файлу субтитрів (SRT).")
-
-# Використовуємо st.columns для створення колонок
-col1, col2 = st.columns([2, 1]) # Створюємо 2 колонки з співвідношенням ширин
-
-# Варіант 1: Без вказання типів файлів - просто видалити параметр type
-
-with col1:
-    # Взагалі не вказуємо типи файлів, просто приймаємо будь-які файли
-    uploaded_file = st.file_uploader(
-        "Завантажте аудіо/відео файл",
-        accept_multiple_files=False
-    )
+def main():
+    st.title("🎤 Розшифровка та переклад аудіо/відео 🎞️")
+    st.markdown("Завантажте аудіо або відео файл для отримання текстової розшифровки, файлу субтитрів (SRT) та перекладу.")
     
-    # Після завантаження файлу - перевіряємо його розширення самостійно
-    if uploaded_file is not None:
-        filename = uploaded_file.name
-        ext = os.path.splitext(filename)[1].lower()
-        allowed_extensions = [".wav", ".mp3", ".mp4", ".mov", ".avi", ".mkv", ".webm", ".mpga", ".mpeg4"]
+    # Використовуємо tabs для розділення функціоналу
+    tab1, tab2 = st.tabs(["📝 Розшифровка", "🌐 Переклад"])
+    
+    with tab1:
+        # Розділ розшифровки - використовуємо колонки для більш компактного розміщення
+        col1, col2 = st.columns([2, 1])
         
-        if ext not in allowed_extensions:
-            st.error(f"Непідтримуваний формат файлу: {ext}. Підтримуються: {', '.join(allowed_extensions)}")
-            uploaded_file = None  # Скидаємо файл, якщо він невідповідного типу
-
-with col2:
-    # st.selectbox для мови - РОЗШИРЕНИЙ СПИСОК МОВ
-    languages = {
-        "auto": "Автовизначення",
-        "uk": "Українська",
-        "en": "Англійська",
-        "ru": "Російська", 
-        "be": "Білоруська",
-        "pl": "Польська",
-        "cs": "Чеська",
-        "sk": "Словацька",
-        "bg": "Болгарська",
-        "de": "Німецька", 
-        "fr": "Французька", 
-        "es": "Іспанська",
-        "it": "Італійська",
-        "pt": "Португальська",
-        "nl": "Нідерландська",
-        "da": "Данська",
-        "sv": "Шведська",
-        "no": "Норвезька",
-        "fi": "Фінська",
-        "hu": "Угорська",
-        "ro": "Румунська",
-        "lt": "Литовська",
-        "lv": "Латвійська",
-        "et": "Естонська",
-        "el": "Грецька",
-        "tr": "Турецька",
-        "ar": "Арабська",
-        "he": "Іврит",
-        "hi": "Гінді",
-        "zh": "Китайська",
-        "ja": "Японська",
-        "ko": "Корейська"
-    }
+        with col1:
+            # Завантаження файлу без обмеження типів
+            uploaded_file = st.file_uploader(
+                "Завантажте аудіо/відео файл",
+                accept_multiple_files=False,
+                key="transcription_file_uploader"
+            )
+            
+            # Після завантаження файлу - перевіряємо його розширення самостійно
+            if uploaded_file is not None:
+                filename = uploaded_file.name
+                ext = os.path.splitext(filename)[1].lower()
+                allowed_extensions = [".wav", ".mp3", ".mp4", ".mov", ".avi", ".mkv", ".webm", ".mpga", ".mpeg4"]
+                
+                if ext not in allowed_extensions:
+                    st.error(f"Непідтримуваний формат файлу: {ext}. Підтримуються: {', '.join(allowed_extensions)}")
+                    uploaded_file = None  # Скидаємо файл, якщо він невідповідного типу
+        
+        with col2:
+            # Вибір моделі Whisper
+            whisper_model_size = st.selectbox(
+                "Розмір моделі Whisper",
+                ["tiny", "base", "small", "medium", "large"],
+                index=1,  # "base" за замовчуванням
+                help="Більший розмір - краща якість, але більше використання пам'яті і повільніша робота"
+            )
+            
+            # Вибір мови та завдання
+            languages = {
+                "auto": "Автовизначення",
+                "uk": "Українська",
+                "en": "Англійська",
+                "ru": "Російська", 
+                "be": "Білоруська",
+                "pl": "Польська",
+                "cs": "Чеська",
+                "sk": "Словацька",
+                "bg": "Болгарська",
+                "de": "Німецька", 
+                "fr": "Французька", 
+                "es": "Іспанська",
+                "it": "Італійська",
+                "pt": "Португальська",
+                "nl": "Нідерландська",
+                "da": "Данська",
+                "sv": "Шведська",
+                "no": "Норвезька",
+                "fi": "Фінська",
+                "hu": "Угорська",
+                "ro": "Румунська",
+                "lt": "Литовська",
+                "lv": "Латвійська",
+                "et": "Естонська",
+                "el": "Грецька",
+                "tr": "Турецька",
+                "ar": "Арабська",
+                "he": "Іврит",
+                "hi": "Гінді",
+                "zh": "Китайська",
+                "ja": "Японська",
+                "ko": "Корейська"
+            }
+            
+            language = st.selectbox(
+                "Мова",
+                options=list(languages.keys()),
+                format_func=lambda x: languages[x],
+                index=list(languages.keys()).index("auto")
+            )
+            
+            task = st.selectbox(
+                "Завдання",
+                ["transcribe", "translate"],
+                format_func=lambda x: "Розшифровка" if x == "transcribe" else "Переклад на англійську",
+                index=0
+            )
+        
+        # Кнопка обробки
+        process_button = st.button("📝 Обробити файл")
+        
+        # Використовуємо session_state для збереження результатів між виконаннями скрипта
+        if 'transcription_result' not in st.session_state:
+            st.session_state.transcription_result = {"text": "", "srt_path": None, "txt_path": None, "segments": None}
+        
+        # Логіка обробки файлу
+        if process_button and uploaded_file is not None:
+            # Оновлюємо глобальну модель перед обробкою (якщо розмір моделі змінився)
+            global whisper_model
+            whisper_model = load_whisper_model(whisper_model_size)
+            
+            # Використовуємо st.status для відображення прогресу
+            with st.status("Початок обробки...", expanded=True) as status:
+                # Викликаємо функцію обробки, передаючи файловий об'єкт від Streamlit та об'єкт статусу
+                text_output_str, srt_path_result, txt_path_result, segments = process_media(
+                    uploaded_file, language, task, status
+                )
+            
+            # Зберігаємо результати в session state
+            st.session_state.transcription_result = {
+                "text": text_output_str if text_output_str is not None else "",
+                "srt_path": srt_path_result,
+                "txt_path": txt_path_result,
+                "segments": segments
+            }
+            logging.info("Результати збережено в session_state.")
+        
+        # Відображення результатів розшифровки
+        st.markdown("## 📜 Результат розшифровки:")
+        
+        # Отримуємо результат з стану
+        result_text_from_state = st.session_state.transcription_result.get("text", "")
+        if result_text_from_state is None:
+            result_text_from_state = ""
+        
+        # Відображаємо збережений текст
+        st.text_area(
+            label="Текст",
+            value=result_text_from_state,
+            height=250,
+            disabled=True,
+            help="Розшифрований текст"
+        )
+        
+        # Кнопки завантаження файлів
+        output_srt_path = st.session_state.transcription_result.get("srt_path")
+        output_txt_path = st.session_state.transcription_result.get("txt_path")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if output_srt_path and os.path.exists(output_srt_path):
+                try:
+                    with open(output_srt_path, "rb") as f:
+                        st.download_button(
+                            label="⬇️ Завантажити SRT файл",
+                            data=f,
+                            file_name=os.path.basename(output_srt_path),
+                            mime="application/x-subrip",
+                            key="download_srt"
+                        )
+                except Exception as e:
+                    st.error(f"Не вдалося підготувати SRT файл для завантаження: {e}")
+        
+        with col2:
+            if output_txt_path and os.path.exists(output_txt_path):
+                try:
+                    with open(output_txt_path, "rb") as f:
+                        st.download_button(
+                            label="⬇️ Завантажити TXT файл",
+                            data=f,
+                            file_name=os.path.basename(output_txt_path),
+                            mime="text/plain",
+                            key="download_txt"
+                        )
+                except Exception as e:
+                    st.error(f"Не вдалося підготувати TXT файл для завантаження: {e}")
     
-    language = st.selectbox(
-        "Мова",
-        options=list(languages.keys()),
-        format_func=lambda x: languages[x],
-        index=list(languages.keys()).index("auto")
-    )
+    # Вкладка перекладу
+    with tab2:
+        # Перевіряємо, чи є текст для перекладу в стані сесії
+        has_text_to_translate = st.session_state.transcription_result.get("text") not in [None, ""]
+        
+        if not has_text_to_translate:
+            st.info("Спочатку виконайте розшифровку аудіо на вкладці 'Розшифровка', щоб отримати текст для перекладу.")
+        else:
+            st.markdown("### 🌐 Переклад розшифрованого тексту")
+            
+            # Отримуємо словник підтримуваних мов
+            translation_languages = get_supported_languages()
+            
+            # Вибір мов для перекладу в двох колонках
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                source_lang = st.selectbox(
+                    "Мова оригіналу:",
+                    options=list(translation_languages.keys()),
+                    format_func=lambda x: f"{translation_languages[x]} ({x})",
+                    index=list(translation_languages.keys()).index("uk") if "uk" in translation_languages else 0
+                )
+            
+            with col2:
+                target_lang = st.selectbox(
+                    "Мова перекладу:",
+                    options=list(translation_languages.keys()),
+                    format_func=lambda x: f"{translation_languages[x]} ({x})",
+                    index=list(translation_languages.keys()).index("en") if "en" in translation_languages else 0
+                )
+            
+            # Кнопка перекладу
+            translate_button = st.button("🌐 Перекласти текст")
+            
+            # Відображення тексту для перекладу
+            st.markdown("#### Текст для перекладу:")
+            st.text_area(
+                label="Оригінальний текст",
+                value=st.session_state.transcription_result.get("text", ""),
+                height=150,
+                disabled=True
+            )
+            
+            # Логіка перекладу
+            if translate_button:
+                with st.status("Виконується переклад...", expanded=True) as status:
+                    status.update(label=f"Переклад з {source_lang} на {target_lang}...", state="running")
+                    
+                    text_to_translate = st.session_state.transcription_result.get("text", "")
+                    
+                   # Викликаємо функцію перекладу
+                    translated_text, translation_path = translate_with_m2m100(text_to_translate, source_lang, target_lang)
+                    
+                    if isinstance(translated_text, str) and "Помилка" in translated_text:
+                        status.update(label=f"Помилка перекладу: {translated_text}", state="error")
+                    else:
+                        status.update(label="Переклад завершено успішно!", state="complete")
+            
+                # Відображення результату перекладу
+                st.markdown("#### Результат перекладу:")
+                
+                # Якщо переклад був виконаний, відображаємо результат
+                if 'translated_text' in locals() and isinstance(translated_text, str):
+                    # Перевіряємо, чи не містить текст повідомлення про помилку
+                    if "Помилка" not in translated_text:
+                        st.text_area(
+                            label="Перекладений текст",
+                            value=translated_text,
+                            height=150,
+                            disabled=True
+                        )
+                        
+                        # Кнопка для завантаження файлу перекладу
+                        if translation_path and os.path.exists(translation_path):
+                            try:
+                                with open(translation_path, "rb") as f:
+                                    st.download_button(
+                                        label="⬇️ Завантажити переклад (TXT)",
+                                        data=f,
+                                        file_name=os.path.basename(translation_path),
+                                        mime="text/plain",
+                                        key="download_translation"
+                                    )
+                            except Exception as e:
+                                st.error(f"Не вдалося підготувати файл перекладу для завантаження: {e}")
+                    else:
+                        st.error(translated_text)
     
-    # st.selectbox для завдання
-    task = st.selectbox(
-        "Завдання",
-        ["transcribe", "translate"],
-        index=["transcribe", "translate"].index("transcribe")
-    )
-
-# Кнопки
-process_button = st.button("📝 Обробити файл")
-clear_button = st.button("🔄 Очистити", help="Очистити поля вводу/виводу та вихідні файли")
-
-
-# --- Логіка обробки та відображення результатів ---
-
-# Використовуємо session_state для збереження результатів між виконаннями скрипта
-if 'transcription_result' not in st.session_state:
-    st.session_state.transcription_result = {"text": "", "srt_path": None, "txt_path": None}
-
-# Перевіряємо, чи була натиснута кнопка "Обробити файл"
-if process_button:
-    if uploaded_file is not None:
-        # Використовуємо st.status для відображення прогресу
-        # expanded=True показує деталі всередині блоку статусу
-        with st.status("Початок обробки...", expanded=True) as status:
-            # Викликаємо вашу функцію обробки, передаючи ФАЙЛОВИЙ ОБ'ЄКТ від Streamlit ТА об'єкт статусу
-            text_output_str, srt_path_result, txt_path_result = process_media(uploaded_file, language, task, status)
-
-        # Зберігаємо результати в session state *після* того, як блок статусу завершився
-        # Streamlit автоматично оновлює статус після виходу з блоку 'with'
-        st.session_state.transcription_result = {
-            "text": text_output_str if text_output_str is not None else "", # Гарантуємо, що текст - це рядок
-            "srt_path": srt_path_result,
-            "txt_path": txt_path_result
-        }
-        logging.info("Результати збережено в session_state.")
-        # st.rerun() # Streamlit автоматично перезапускається після натискання кнопки, цей рядок не завжди потрібен, але може допомогти гарантувати оновлення
-
+    # Відображення вихідних файлів та інформації про вільне місце
+    st.markdown("---")
+    st.markdown("## 📁 Управління файлами")
+    
+    # Получаємо список файлів
+    output_files = get_output_files()
+    
+    # Відображаємо вихідні файли
+    if output_files:
+        # Створюємо колонки для більш компактного відображення
+        st.write(f"Вихідні файли ({len(output_files)}):")
+        
+        # Використовуємо контейнер з прокруткою для відображення вихідних файлів
+        with st.container():
+            for file_path in output_files:
+                col1, col2, col3 = st.columns([5, 2, 2])
+                file_name = os.path.basename(file_path)
+                file_size = os.path.getsize(file_path) / 1024  # розмір в KB
+                
+                # Формат дати створення файлу
+                file_ctime = datetime.datetime.fromtimestamp(os.path.getctime(file_path))
+                date_str = file_ctime.strftime("%Y-%m-%d %H:%M:%S")
+                
+                with col1:
+                    st.text(file_name)
+                
+                with col2:
+                    st.text(f"{file_size:.1f} KB")
+                
+                with col3:
+                    try:
+                        with open(file_path, "rb") as f:
+                            st.download_button(
+                                label="⬇️",
+                                data=f,
+                                file_name=file_name,
+                                mime="application/octet-stream",
+                                key=f"download_{file_name}"
+                            )
+                    except Exception as e:
+                        st.error(f"Помилка: {e}")
+        
+        # Кнопка для очищення всіх вихідних файлів
+        if st.button("🗑️ Очистити всі вихідні файли"):
+            delete_all_output_files()
+            st.success("Всі вихідні файли видалено.")
+            st.experimental_rerun()
     else:
-        st.warning("Будь ласка, завантажте файл перед обробкою.")
-
-# --- Відображення результатів (читаємо з session_state) ---
-
-st.markdown("## 📜 Результат розшифровки:")
-
-# Отримуємо результат з стану, гарантуємо, що це рядок для st.text_area
-result_text_from_state = st.session_state.transcription_result.get("text", "") # Використовуємо .get для безпеки, якщо ключ раптом відсутній
-if result_text_from_state is None: # Подвійна перевірка, хоча session_state має зберігати рядок або ""
-    result_text_from_state = ""
-
-# Аналог gr.Textbox - відображаємо збережений текст
-# ВИПРАВЛЕННЯ: Використовуємо disabled=True замість interactive=False
-# Рядок 267 у фінальному коді може трохи відрізнятись через додавання/видалення коментарів
-st.text_area(
-    label="Текст",
-    value=result_text_from_state, # Передаємо гарантований рядок
-    height=250,
-    disabled=True, # Використовуємо disabled=True для неактивного поля
-    help="Розшифрований текст"
-)
-
-# Аналог gr.File для SRT та TXT - кнопки завантаження
-# Перевіряємо, чи існують файли перед тим, як пропонувати завантаження
-output_srt_path = st.session_state.transcription_result.get("srt_path")
-output_txt_path = st.session_state.transcription_result.get("txt_path")
-
-# Додаємо перевірку os.path.exists перед створенням кнопки завантаження
-if output_srt_path and os.path.exists(output_srt_path):
+        st.info("Немає доступних вихідних файлів.")
+    
+    # Інформація про використання сховища
+    st.markdown("### 💾 Інформація про диск")
+    
     try:
-        with open(output_srt_path, "rb") as f: # Читаємо як бінарний файл
-            st.download_button(
-                label="⬇️ Завантажити SRT файл",
-                data=f,
-                file_name=os.path.basename(output_srt_path),
-                mime="application/x-subrip",
-                key="download_srt" # Додаємо унікальний ключ
-            )
+        total_size = 0
+        for dirpath, dirnames, filenames in os.walk(OUTPUT_DIR):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                if os.path.exists(fp):
+                    total_size += os.path.getsize(fp)
+        
+        # Отримуємо інформацію про диск
+        disk = shutil.disk_usage("/")
+        
+        # Відображаємо інформацію
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Використано (вихідні файли)", f"{total_size / (1024*1024):.2f} MB")
+        
+        with col2:
+            st.metric("Вільно на диску", f"{disk.free / (1024*1024*1024):.1f} GB")
+        
+        with col3:
+            st.metric("Всього на диску", f"{disk.total / (1024*1024*1024):.1f} GB")
+    
     except Exception as e:
-        st.error(f"Не вдалося підготувати SRT файл для завантаження: {e}")
+        st.error(f"Не вдалося отримати інформацію про диск: {e}")
+    
+    # Додаткова інформація та налаштування
+    with st.expander("ℹ️ Інформація про додаток"):
+        st.markdown("""
+        ### 🎤 Розшифровка та переклад аудіо/відео
+        
+        Цей додаток дозволяє:
+        1. 📝 **Розшифровувати** аудіо та відео файли за допомогою моделі Whisper
+        2. 🎬 **Створювати субтитри** у форматі SRT
+        3. 🌐 **Перекладати** розшифрований текст на різні мови
+        
+        **Підтримувані формати файлів:**
+        - Аудіо: `.wav`, `.mp3`, `.mpga`
+        - Відео: `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm`
+        
+        **Використовувані технології:**
+        - Whisper від OpenAI для розшифровки аудіо/відео
+        - M2M-100 від Facebook для перекладу тексту
+        
+        **Про обмеження:**
+        - Більші файли потребують більше часу та пам'яті для обробки
+        - Якість розшифровки залежить від якості аудіо та розміру обраної моделі
+        - Переклад може мати неточності, особливо для специфічної термінології
+        
+        **Порада:** Для швидкої обробки використовуйте моделі `tiny` або `base`. Для кращої якості – `small`, `medium` або `large`.
+        """)
+    
+    # Використовуємо два рядки в футері для статистики та авторських прав
+    st.markdown("---")
+    footer_col1, footer_col2 = st.columns(2)
+    
+    with footer_col1:
+        # Відображаємо поточний час та інформацію про GPU
+        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        gpu_info = "Доступний" if torch.cuda.is_available() else "Недоступний"
+        st.write(f"🕒 {current_time} | 🖥️ GPU: {gpu_info}")
+    
+    with footer_col2:
+        # Авторські права та версія
+        st.write("© 2023 | Версія 1.0.0 | Зроблено в Україні 🇺🇦")
 
-
-if output_txt_path and os.path.exists(output_txt_path):
-    try:
-        with open(output_txt_path, "rb") as f:
-            st.download_button(
-                label="⬇️ Завантажити TXT файл",
-                data=f,
-                file_name=os.path.basename(output_txt_path),
-                mime="text/plain",
-                 key="download_txt" # Додаємо унікальний ключ
-            )
-    except Exception as e:
-        st.error(f"Не вдалося підготувати TXT файл для завантаження: {e}")
-
-
-# --- Логіка очищення ---
-
-# При натисканні кнопки "Очистити"
-if clear_button:
-    logging.info("Натиснуто кнопку Очистити.")
-    delete_all_output_files() # Видаляємо файли на сервері
-    # Скидаємо стан, щоб очистити поля виводу
-    st.session_state.transcription_result = {"text": "", "srt_path": None, "txt_path": None}
-    logging.info("Стан додатку очищено.")
-    # st.experimental_rerun() # старіший спосіб
-    st.rerun() # Перезапускаємо скрипт для оновлення UI
-
-# --- Відображення файлів на сервері (Аналог gr.Files) ---
-
-st.markdown("## 📂 Файли на сервері:")
-
-# Отримуємо список файлів та відображаємо кнопки для їх завантаження
-current_files = get_output_files()
-if current_files:
-    st.write("Доступні файли:")
-    # Створюємо кнопки для кожного файлу, використовуючи його шлях/ім'я як унікальний ключ
-    for i, file_path in enumerate(current_files):
-        file_name = os.path.basename(file_path)
-        try:
-            with open(file_path, "rb") as f:
-                 st.download_button(
-                     label=f"⬇️ {file_name}",
-                     data=f,
-                     file_name=file_name,
-                     key=f"download_output_{i}_{file_name}" # Унікальний ключ для кожної кнопки
-                 )
-        except Exception as e:
-             st.error(f"Не вдалося прочитати файл {file_name} для завантаження: {e}")
-else:
-    st.write("Наразі немає вихідних файлів на сервері.")
-
-# Кнопка оновлення списку файлів
-# Оскільки Streamlit перезапускається при багатьох діях, список оновлюватиметься.
-# Можна додати окрему кнопку, якщо потрібно оновлювати список без інших дій.
-# if st.button("🔄 Оновити список файлів"):
-#    st.rerun()
-
-
-# --- Footer ---
-st.markdown(
-    """
-    <div style="text-align: center; margin-top: 40px; color: grey; font-size: 0.9em;">
-        Розроблено з використанням Whisper та Streamlit
-    </div>
-    """,
-    unsafe_allow_html=True # Дозволяє вставляти HTML
-)
+if __name__ == "__main__":
+    main()
