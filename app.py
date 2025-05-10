@@ -266,21 +266,11 @@ if not isinstance(result_text_from_state, str):
 # Аналог gr.Textbox - відображаємо збережений текст
 st.text_area(
     label="Текст",
-    value=result_text_from_state, # Тепер використовуємо змінну після діагностики
+    value=result_text_from_state,
     height=250,
-    interactive=False, # Користувач не може редагувати результат
+    disabled=True, # Використовуємо disabled=True замість interactive=False
     help="Розшифрований текст"
 )
-# ... решта коду для srt/txt завантаження ...
-# Аналог gr.Textbox - відображаємо збережений текст
-st.text_area(
-    label="Текст",
-    value=st.session_state.transcription_result["text"],
-    height=250,
-    interactive=False, # Користувач не може редагувати результат
-    help="Розшифрований текст"
-)
-
 # Аналог gr.File для SRT та TXT - кнопки завантаження
 # Перевіряємо, чи існують файли перед тим, як пропонувати завантаження
 output_srt_path = st.session_state.transcription_result["srt_path"]
