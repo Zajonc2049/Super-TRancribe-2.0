@@ -621,7 +621,7 @@ def main():
             }
             st.session_state.manual_translation_result_text = None
             st.session_state.manual_translation_result_path = None
-            st.experimental_rerun()
+            st.rerun()
     else:
         st.info("Немає доступних згенерованих файлів.")
     
