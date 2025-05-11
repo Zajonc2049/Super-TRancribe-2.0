@@ -392,7 +392,12 @@ def main():
                 "Розмір моделі Whisper",
                 ["tiny", "base", "small", "medium", "large"],
                 index=1,
-                help="Більший розмір - краща якість, але більше використання пам'яті і повільніша робота"
+                help="""Більший розмір - краща якість, але більше використання пам'яті і повільніша робота
+                - tiny: ~1GB, швидкий, базова якість
+                - base: ~1GB, середня швидкість, хороша якість
+                - small: ~2GB, повільніший, краща якість
+                - medium: ~5GB, повільний, висока якість
+                - large: ~10GB, дуже повільний, найкраща якість"""
             )
             
             whisper_languages = {
@@ -680,6 +685,44 @@ def main():
         st.write(f"🕒 {current_time} | 🖥️ GPU: {gpu_info}")
     with footer_col2:
         st.write("© 2023-2024 | Версія 2.0.0 | Зроблено в Україні 🇺🇦")
+
+    # Add a better file management interface
+    def show_file_management():
+        st.markdown("### 📁 Управління файлами")
+        
+        # Add file search
+        search_query = st.text_input("🔍 Пошук файлів", "")
+        
+        # Add file filtering
+        file_types = st.multiselect(
+            "Фільтр за типом",
+            ["TXT", "MP3", "MP4", "Всі"],
+            default=["Всі"]
+        )
+        
+        # Show files in a more organized way
+        if output_files:
+            for file_path in output_files:
+                if search_query.lower() in file_path.lower():
+                    with st.expander(os.path.basename(file_path)):
+                        col1, col2, col3 = st.columns([3, 1, 1])
+                        with col1:
+                            st.write(f"📄 {os.path.basename(file_path)}")
+                        with col2:
+                            st.write(f"📊 {os.path.getsize(file_path) / 1024:.1f} KB")
+                        with col3:
+                            if st.button("🗑️", key=f"delete_{file_path}"):
+                                os.remove(file_path)
+                                st.success("Файл видалено!")
+                                st.rerun()
+
+    # Add a progress bar for model loading
+    def show_model_loading_progress():
+        progress_bar = st.progress(0)
+        for i in range(100):
+            time.sleep(0.01)
+            progress_bar.progress(i + 1)
+        return progress_bar
 
 if __name__ == "__main__":
     main()
