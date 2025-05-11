@@ -413,11 +413,20 @@ def main():
         process_button = st.button("🚀 Обробити файл", use_container_width=True)
         
         if process_button and uploaded_file is not None:
-            global whisper_model_instance # Використовуємо глобальну змінну для моделі Whisper
-            if whisper_model_instance.name != whisper_model_size_option: # Перевіряємо, чи змінився розмір
-                 with st.spinner(f"Завантаження моделі Whisper '{whisper_model_size_option}'... Це може зайняти деякий час."):
-                    whisper_model_instance = load_whisper_model(whisper_model_size_option) # Перезавантажуємо, якщо змінився розмір
-            
+           @st.cache_resource
+def load_whisper_model(model_name="base"):
+    """Завантажує модель Whisper і кешує її."""
+    logging.info(f"Завантаження моделі Whisper: {model_name}")
+    try:
+        model = whisper.load_model(model_name)
+        # Додаємо атрибут name до моделі
+        model.name = model_name
+        logging.info("Модель Whisper завантажено успішно.")
+        return model
+    except Exception as e:
+        logging.error(f"Помилка під час завантаження моделі Whisper '{model_name}': {e}")
+        st.error(f"Не вдалося завантажити модель Whisper: {e}")
+        return None            
             if whisper_model_instance is None:
                 st.error("Не вдалося завантажити модель Whisper. Обробка неможлива.")
             else:
