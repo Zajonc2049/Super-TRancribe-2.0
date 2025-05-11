@@ -37,6 +37,8 @@ def load_whisper_model(model_name="base"):
     logging.info(f"Завантаження моделі Whisper: {model_name}")
     try:
         model = whisper.load_model(model_name)
+        # Додаємо атрибут name до моделі
+        model.name = model_name  # Додайте цей рядок
         logging.info("Модель Whisper завантажено успішно.")
         return model
     except Exception as e:
