@@ -117,7 +117,6 @@ def translate_with_m2m100(text, source_lang, target_lang):
     if not text or not source_lang or not target_lang:
         logging.warning("Функцію перекладу викликано з неповними даними.")
         return "Текст, вихідна або цільова мова не вказані.", None
-
     logging.info(f"Запуск перекладу тексту з '{source_lang}' на '{target_lang}'")
     model, tokenizer = load_m2m100_model() 
     
@@ -125,42 +124,53 @@ def translate_with_m2m100(text, source_lang, target_lang):
         return "Не вдалося завантажити модель перекладу M2M-100", None
     
     try:
-        # Встановлюємо вихідну мову для токенізатора
-        # M2M100 очікує коди мов зі списку tokenizer.langs
-        if source_lang not in tokenizer.langs:
+        # ЗМІНА: Перевіряємо мову через try-except замість перевірки атрибуту langs
+        try:
+            # Спробуємо отримати ID мови для перевірки підтримки
+            tokenizer.get_lang_id(source_lang)
+            tokenizer.src_lang = source_lang
+        except (KeyError, AttributeError):
             logging.error(f"Мова оригіналу '{source_lang}' не підтримується токенізатором M2M100.")
             # Спробуємо знайти схожий код, наприклад, 'uk_UA' -> 'uk'
             simple_source_lang = source_lang.split('_')[0]
-            if simple_source_lang in tokenizer.langs:
+            try:
+                tokenizer.get_lang_id(simple_source_lang)
                 logging.info(f"Використовується спрощений код мови оригіналу: '{simple_source_lang}'")
                 tokenizer.src_lang = simple_source_lang
-            else:
+            except (KeyError, AttributeError):
                 return f"Мова оригіналу '{source_lang}' не підтримується M2M100.", None
-        else:
-            tokenizer.src_lang = source_lang
         
         # Токенізуємо вхідний текст
-        encoded_text = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=1024) # Збільшено max_length
+        encoded_text = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=1024)
         
         # Генеруємо переклад
         with torch.no_grad():
-            # Встановлюємо токен цільової мови для генерації
-            if target_lang not in tokenizer.langs:
+            # ЗМІНА: Аналогічно перевіряємо цільову мову
+            try:
+                target_lang_id = tokenizer.get_lang_id(target_lang)
+            except (KeyError, AttributeError):
                 logging.error(f"Цільова мова '{target_lang}' не підтримується токенізатором M2M100.")
                 simple_target_lang = target_lang.split('_')[0]
-                if simple_target_lang in tokenizer.langs:
-                     logging.info(f"Використовується спрощений код цільової мови: '{simple_target_lang}'")
-                     target_lang_id = tokenizer.get_lang_id(simple_target_lang)
-                else:
+                try:
+                    target_lang_id = tokenizer.get_lang_id(simple_target_lang)
+                    logging.info(f"Використовується спрощений код цільової мови: '{simple_target_lang}'")
+                except (KeyError, AttributeError):
                     return f"Цільова мова '{target_lang}' не підтримується M2M100.", None
-            else:
-                target_lang_id = tokenizer.get_lang_id(target_lang)
-
+            
             generated_tokens = model.generate(
                 **encoded_text,
                 forced_bos_token_id=target_lang_id,
-                max_length=1024 # Збільшено max_length
+                max_length=1024
             )
+
+        # Декодуємо результат
+        translated_text = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+        return translated_text, None
+    
+    except Exception as e:
+        logging.error(f"Помилка під час перекладу M2M100: {str(e)}")
+        logging.error(traceback.format_exc())
+        return f"Помилка під час перекладу: {str(e)}", None
         
         # Декодуємо результат
         translated_text = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
