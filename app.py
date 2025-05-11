@@ -14,6 +14,7 @@ import io # Потрібно для читання завантажених фа
 import torch
 from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
 import tempfile
+st.set_page_config(layout="wide")
 
 # --- Налаштування логування ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
@@ -351,7 +352,7 @@ def delete_all_output_files():
 # --- ПОБУДОВА ІНТЕРФЕЙСУ STREAMLIT ---
 
 def main():
-    st.set_page_config(layout="wide")
+    
     st.title("🎤 Розшифровка та переклад аудіо/відео 🎞️")
     st.markdown("Завантажте аудіо або відео файл для отримання текстової розшифровки та автоматичного перекладу.")
     
